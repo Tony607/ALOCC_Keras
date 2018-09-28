@@ -1,0 +1,7 @@
+numpy
+scipy
+keras
+matplotlib
+mpld3
+scikit-learn
+scikit-image

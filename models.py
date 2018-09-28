@@ -87,6 +87,8 @@ class ALOCC_Model():
 
         if self.dataset_name == 'mnist':
           (X_train, y_train), (_, _) = mnist.load_data()
+          # Make the data range between 0~1.
+          X_train = X_train / 255
           specific_idx = np.where(y_train == self.attention_label)[0]
           self.data = X_train[specific_idx].reshape(-1, 28, 28, 1)
           self.c_dim = 1
@@ -105,7 +107,7 @@ class ALOCC_Model():
         Returns:
             [Tensor] -- Output tensor of the generator/R network.
         """
-        image = Input(shape=input_shape)
+        image = Input(shape=input_shape, name='z')
         # Encoder.
         x = Conv2D(filters=self.df_dim * 2, kernel_size = 5, strides=2, padding='same', name='g_encoder_h0_conv')(image)
         x = BatchNormalization()(x)
@@ -119,11 +121,19 @@ class ALOCC_Model():
 
         # Decoder.
         # TODO: need a flexable solution to select output_padding and padding.
-        x = Conv2DTranspose(self.gf_dim*2, kernel_size = 5, strides=2, dilation_rate=1, activation='relu', padding='same', output_padding=0, name='g_decoder_h0')(x)
-        x = BatchNormalization()(x)
-        x = Conv2DTranspose(self.gf_dim*1, kernel_size = 5, strides=2, dilation_rate=1, activation='relu', padding='same', output_padding=1, name='g_decoder_h1')(x)
-        x = BatchNormalization()(x)
-        x = Conv2DTranspose(self.c_dim,    kernel_size = 5, strides=2, dilation_rate=1, activation='tanh', padding='same', output_padding=1, name='g_decoder_h2')(x)
+        # x = Conv2DTranspose(self.gf_dim*2, kernel_size = 5, strides=2, activation='relu', padding='same', output_padding=0, name='g_decoder_h0')(x)
+        # x = BatchNormalization()(x)
+        # x = Conv2DTranspose(self.gf_dim*1, kernel_size = 5, strides=2, activation='relu', padding='same', output_padding=1, name='g_decoder_h1')(x)
+        # x = BatchNormalization()(x)
+        # x = Conv2DTranspose(self.c_dim,    kernel_size = 5, strides=2, activation='tanh', padding='same', output_padding=1, name='g_decoder_h2')(x)
+
+        x = Conv2D(self.gf_dim*1, kernel_size=5, activation='relu', padding='same')(x)
+        x = UpSampling2D((2, 2))(x)
+        x = Conv2D(self.gf_dim*1, kernel_size=5, activation='relu', padding='same')(x)
+        x = UpSampling2D((2, 2))(x)
+        x = Conv2D(self.gf_dim*2, kernel_size=3, activation='relu')(x)
+        x = UpSampling2D((2, 2))(x)
+        x = Conv2D(self.c_dim, kernel_size=5, activation='sigmoid', padding='same')(x)
         return Model(image, x, name='R')
 
     def build_discriminator(self, input_shape):
@@ -137,7 +147,7 @@ class ALOCC_Model():
             [Tensor] -- Network output tensors.
         """
 
-        image = Input(shape=input_shape)
+        image = Input(shape=input_shape, name='d_input')
         x = Conv2D(filters=self.df_dim, kernel_size = 5, strides=2, padding='same', name='d_h0_conv')(image)
         x = LeakyReLU()(x)
 
@@ -160,60 +170,38 @@ class ALOCC_Model():
 
     def build_model(self):
         image_dims = [self.input_height, self.input_width, self.c_dim]
-        # Original image input for generator/R network.
-        self.inputs = Input(shape=image_dims, name='real_images')
-        inputs = self.inputs
-
-        # Image input to the generator/R.
-        self.z = Input(shape=image_dims, name='z')
-
-        # Construct generator/R network.
-        self.generator = self.build_generator(image_dims)
-        self.G = self.generator(self.z)
-
+        optimizer = RMSprop(lr=0.002, clipvalue=1.0, decay=1e-8)
         # Construct discriminator/D network takes real image as input.
         # D - sigmoid and D_logits -linear output.
         self.discriminator = self.build_discriminator(image_dims)
-        self.D = self.discriminator(inputs)
 
-        # Construct discriminator/D network takes real image as input.
-        # D - sigmoid output.
-        self.discriminator = self.build_discriminator(image_dims)
-        self.D_ = self.discriminator(self.G)
-        
         # Model to train D to discrimate real images.
-        optimizer = RMSprop(lr=0.002, clipvalue=1.0, decay=1e-8)
         self.discriminator.compile(optimizer=optimizer, loss='binary_crossentropy')
-        print('\n\rdiscriminator')
-        self.discriminator.summary()
+
+        # Construct generator/R network.
+        self.generator = self.build_generator(image_dims)
+        img = Input(shape=image_dims)
+
+        reconstructed_img = self.generator(img)
 
         self.discriminator.trainable = False
+        validity = self.discriminator(reconstructed_img)
+        
         # Model to train Generator/R to minimize reconstruction loss and trick D to see
         # generated images as real ones.
-        self.model_train_R = Model(self.z, [self.G, self.D_])
-        self.model_train_R.compile(loss=['mse', 'binary_crossentropy'],
+        self.adversarial_model = Model(img, [reconstructed_img, validity])
+        self.adversarial_model.compile(loss=['binary_crossentropy', 'binary_crossentropy'],
             loss_weights=[self.r_alpha, 1],
             optimizer=optimizer)
 
-        # z->R->D, train D to discriminate generated as "fake" images.
-        self.discriminator.trainable = True
-        self.generator.trainable = False
-        self.model_train_D = Model(self.z, self.D_)
-        self.model_train_D.compile(optimizer=optimizer, loss='binary_crossentropy')
+        print('\n\rdiscriminator')
+        self.discriminator.summary()
 
-        self.discriminator.trainable = False
-        self.generator.trainable = True # TODO: set to False after debugging.
-        self.sampler = self.generator
-        self.sampler.compile(optimizer=optimizer, loss='mse')
-        print('\n\rmodel_train_R')
-        self.model_train_R.summary()
-        print('\n\rmodel_train_D')
-        self.model_train_D.summary()
-        print('\n\rsampler')
-        self.sampler.summary()
+        print('\n\adversarial_model')
+        self.adversarial_model.summary()
 
-
-    def train_auto_encoder(self, epochs, batch_size = 128, sample_interval=500):
+    
+    def train(self, epochs, batch_size = 128, sample_interval=500):
         # Make log folder if not exist.
         log_dir = os.path.join(self.log_dir, self.model_dir)
         os.makedirs(log_dir, exist_ok=True)
@@ -228,14 +216,9 @@ class ALOCC_Model():
         scipy.misc.imsave('./{}/train_input_samples.jpg'.format(self.sample_dir), montage(sample_inputs[:,:,:,0]))
 
         counter = 1
-        # TODO: Load previously train model if exists.
-        # could_load, checkpoint_counter = self.load(self.checkpoint_dir)
-        # if could_load:
-        #     counter = checkpoint_counter
-        #     print(" [*] Load SUCCESS")
-        # else:
-        #     print(" [!] Load failed...")
-
+        # Record generator/R network reconstruction training losses.
+        plot_epochs = []
+        plot_g_recon_losses = []
 
         # Load traning data, add random noise.
         if self.dataset_name == 'mnist':
@@ -260,83 +243,23 @@ class ALOCC_Model():
                 batch_images = np.array(batch).astype(np.float32)
                 batch_noise_images = np.array(batch_noise).astype(np.float32)
                 if self.dataset_name == 'mnist':
-                    # Update R network, minimize reconstruction loss. auto try batch_noise_images
-                    g_r_loss = self.sampler.train_on_batch(batch_noise_images, batch_noise_images)
-                counter += 1
-                msg = 'Epoch:[{0}]-[{1}/{2}] --> g_r_loss: {3:>0.3f}'.format(epoch, idx, batch_idxs, g_r_loss)
-                print(msg)
-                logging.info(msg)
-                if np.mod(counter, sample_interval) == 0:
-                    if self.dataset_name == 'mnist':
-                        samples = self.sampler.predict(sample_inputs)
-                        manifold_h = int(np.ceil(np.sqrt(samples.shape[0])))
-                        manifold_w = int(np.floor(np.sqrt(samples.shape[0])))
-                        save_images(samples, [manifold_h, manifold_w],
-                            './{}/ae_train_{:02d}_{:04d}.png'.format(self.sample_dir, epoch, idx))
-
-            # Save the checkpoint end of each epoch.
-            self.save(epoch)
-    def train(self, epochs, batch_size = 128, sample_interval=500):
-        # Make log folder if not exist.
-        log_dir = os.path.join(self.log_dir, self.model_dir)
-        os.makedirs(log_dir, exist_ok=True)
-        
-        if self.dataset_name == 'mnist':
-            # Get a batch of sample images with attention_label to export as montage.
-            sample = self.data[0:batch_size]
-
-        # Export images as montage, sample_input also use later to generate sample R network outputs during training.
-        sample_inputs = np.array(sample).astype(np.float32)
-        os.makedirs(self.sample_dir, exist_ok=True)
-        scipy.misc.imsave('./{}/train_input_samples.jpg'.format(self.sample_dir), montage(sample_inputs[:,:,:,0]))
-
-        counter = 1
-        # TODO: Load previously train model if exists.
-        # could_load, checkpoint_counter = self.load(self.checkpoint_dir)
-        # if could_load:
-        #     counter = checkpoint_counter
-        #     print(" [*] Load SUCCESS")
-        # else:
-        #     print(" [!] Load failed...")
-
-
-        # Load traning data, add random noise.
-        if self.dataset_name == 'mnist':
-            sample_w_noise = get_noisy_data(self.data)
-
-        # Adversarial ground truths
-        ones = np.ones((batch_size, 1))
-        zeros = np.zeros((batch_size, 1))
-
-        for epoch in range(epochs):
-            print('Epoch ({}/{})-------------------------------------------------'.format(epoch,epochs))
-            if self.dataset_name == 'mnist':
-                # Number of batches computed by total number of target data / batch size.
-                batch_idxs = len(self.data) // batch_size
-             
-            for idx in range(0, batch_idxs):
-                # Get a batch of images and add random noise.
-                if self.dataset_name == 'mnist':
-                    batch = self.data[idx * batch_size:(idx + 1) * batch_size]
-                    batch_noise = sample_w_noise[idx * batch_size:(idx + 1) * batch_size]
-                # Turn batch images data to float32 type.
-                batch_images = np.array(batch).astype(np.float32)
-                batch_noise_images = batch_images #np.array(batch_noise).astype(np.float32)
-                if self.dataset_name == 'mnist':
+                    batch_fake_images = self.generator.predict(batch_noise_images)
                     # Update D network, minimize real images inputs->D-> ones, noisy z->R->D->zeros loss.
                     d_loss_real = self.discriminator.train_on_batch(batch_images, ones)
-                    d_loss_fake = self.model_train_D.train_on_batch(batch_images, zeros)
+                    d_loss_fake = self.discriminator.train_on_batch(batch_fake_images, zeros)
 
                     # Update R network twice, minimize noisy z->R->D->ones and reconstruction loss.
-                    self.model_train_R.train_on_batch(batch_noise_images, [batch_noise_images, ones])
-                    g_loss = self.model_train_R.train_on_batch(batch_noise_images, [batch_noise_images, ones])
+                    self.adversarial_model.train_on_batch(batch_noise_images, [batch_noise_images, ones])
+                    g_loss = self.adversarial_model.train_on_batch(batch_noise_images, [batch_noise_images, ones])    
+                    plot_epochs.append(epoch+idx/batch_idxs)
+                    plot_g_recon_losses.append(g_loss[1])
                 counter += 1
-                msg = 'Epoch:[{0}]-[{1}/{2}] --> d_loss: {3:>0.3f}, g_loss:{4:>0.3f}'.format(epoch, idx, batch_idxs, d_loss_real+d_loss_fake, g_loss[0])
+                msg = 'Epoch:[{0}]-[{1}/{2}] --> d_loss: {3:>0.3f}, g_loss:{4:>0.3f}, g_recon_loss:{4:>0.3f}'.format(epoch, idx, batch_idxs, d_loss_real+d_loss_fake, g_loss[0], g_loss[1])
                 print(msg)
                 logging.info(msg)
                 if np.mod(counter, sample_interval) == 0:
                     if self.dataset_name == 'mnist':
-                        samples = self.sampler.predict(sample_inputs)
+                        samples = self.generator.predict(sample_inputs)
                         manifold_h = int(np.ceil(np.sqrt(samples.shape[0])))
                         manifold_w = int(np.floor(np.sqrt(samples.shape[0])))
                         save_images(samples, [manifold_h, manifold_w],
@@ -344,6 +267,13 @@ class ALOCC_Model():
 
             # Save the checkpoint end of each epoch.
             self.save(epoch)
+        # Export the Generator/R network reconstruction losses as a plot.
+        plt.title('Generator/R network reconstruction losses')
+        plt.xlabel('Epoch')
+        plt.ylabel('training loss')
+        plt.grid()
+        plt.plot(plot_epochs,plot_g_recon_losses)
+        plt.savefig('plot_g_recon_losses.png')
 
     @property
     def model_dir(self):
@@ -359,10 +289,9 @@ class ALOCC_Model():
         """
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         model_name = 'ALOCC_Model_{}.h5'.format(step)
-        self.model_train_D.save_weights(os.path.join(self.checkpoint_dir, model_name))
+        self.adversarial_model.save_weights(os.path.join(self.checkpoint_dir, model_name))
 
 
 if __name__ == '__main__':
     model = ALOCC_Model(dataset_name='mnist', input_height=28,input_width=28)
-    # model.train_auto_encoder(epochs=40, batch_size=128, sample_interval=500)
-    model.train(epochs=40, batch_size=128, sample_interval=500)
+    model.train(epochs=5, batch_size=128, sample_interval=500)
