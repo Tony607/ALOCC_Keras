@@ -239,9 +239,11 @@ class ALOCC_Model():
                 if self.dataset_name == 'mnist':
                     batch = self.data[idx * batch_size:(idx + 1) * batch_size]
                     batch_noise = sample_w_noise[idx * batch_size:(idx + 1) * batch_size]
+                    batch_clean = self.data[idx * batch_size:(idx + 1) * batch_size]
                 # Turn batch images data to float32 type.
                 batch_images = np.array(batch).astype(np.float32)
                 batch_noise_images = np.array(batch_noise).astype(np.float32)
+                batch_clean_images = np.array(batch_clean).astype(np.float32)
                 if self.dataset_name == 'mnist':
                     batch_fake_images = self.generator.predict(batch_noise_images)
                     # Update D network, minimize real images inputs->D-> ones, noisy z->R->D->zeros loss.
@@ -249,8 +251,8 @@ class ALOCC_Model():
                     d_loss_fake = self.discriminator.train_on_batch(batch_fake_images, zeros)
 
                     # Update R network twice, minimize noisy z->R->D->ones and reconstruction loss.
-                    self.adversarial_model.train_on_batch(batch_noise_images, [batch_noise_images, ones])
-                    g_loss = self.adversarial_model.train_on_batch(batch_noise_images, [batch_noise_images, ones])    
+                    self.adversarial_model.train_on_batch(batch_noise_images, [batch_clean_images, ones])
+                    g_loss = self.adversarial_model.train_on_batch(batch_noise_images, [batch_clean_images, ones])    
                     plot_epochs.append(epoch+idx/batch_idxs)
                     plot_g_recon_losses.append(g_loss[1])
                 counter += 1
