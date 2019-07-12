@@ -12,7 +12,7 @@ Adversarially Learned One-Class Classifier or ALOCC for short.
 Require [Python 3.5+](https://www.python.org/ftp/python/3.6.4/python-3.6.4.exe) and [Jupyter notebook](https://jupyter.readthedocs.io/en/latest/install.html) installed
 ### Clone or download this repo
 ```
-git clone https://github.com/Tony607/Keras_TimeseriesGenerator
+git clone https://github.com/Tony607/ALOCC_Keras
 ```
 ### Install required libraries
 `pip3 install -r requirements.txt`
